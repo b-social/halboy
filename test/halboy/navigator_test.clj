@@ -65,6 +65,7 @@
         (stubs/on-get
           (create-url base-url "/users")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users")
                      (hal/add-resources
                        :users (create-user "fred")
@@ -91,7 +92,7 @@
             (-> (navigator/discover base-url)
               (navigator/get :users))))))
 
-  (testing "should throw an error when the response is not JSON"
+  (testing "should NOT throw an error when the response is not JSON"
     (with-fake-routes-in-isolation
       (merge
         (stubs/on-discover
@@ -102,11 +103,8 @@
           (create-url base-url "/users")
           {:status 200
            :body   "I am not JSON"}))
-      (is (thrown-with-msg?
-            ExceptionInfo
-            #"Response body was not valid JSON"
-            (-> (navigator/discover base-url)
-              (navigator/get :users))))))
+      (is (-> (navigator/discover base-url)
+            (navigator/get :users)))))
 
   (testing "should be able to navigate through links with query params"
     (with-fake-routes-in-isolation
@@ -119,6 +117,7 @@
           (create-url base-url "/users")
           {:admin "true"}
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users")
                      (hal/add-resources
                        :users (create-user "fred")
@@ -148,6 +147,7 @@
           {:admin "true"
            :owner "false"}
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users")
                      (hal/add-resources
                        :users (create-user "fred")
@@ -175,6 +175,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas/friends") {:mutual "true"}
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas/friends")
                      (hal/add-resources
                        :users (create-user "fred")
@@ -205,6 +206,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas")
                      (hal/add-property :name "Thomas")
                      (json/resource->json))}))
@@ -245,6 +247,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas")
                      (hal/add-property :name "Thomas")
                      (hal/add-property :surname "Svensson")
@@ -272,6 +275,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource)
                      (hal/add-link :self "/users/thomas")
                      (hal/add-property :name "Thomas")
@@ -313,6 +317,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas/items/1")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas/items/1")
                      (hal/add-property :name "Sponge")
                      (json/resource->json))}))
@@ -373,6 +378,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas")
                      (hal/add-property :name "Thomas")
                      (json/resource->json))}))
@@ -412,6 +418,7 @@
           (create-url base-url "/users/thomas")
           {:name "Thomas"}
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas")
                      (hal/add-property :name "Thomas")
                      (json/resource->json))}))
@@ -437,6 +444,7 @@
         (stubs/on-get
           (create-url base-url "/users/thomas")
           {:status 200
+           :headers {:content-type "application/hal+json"}
            :body   (-> (hal/new-resource "/users/thomas")
                      (hal/add-property :name "Thomas")
                      (json/resource->json))}))
@@ -513,6 +521,7 @@
       (stubs/on-get
         (create-url base-url "/users")
         {:status 200
+         :headers {:content-type "application/hal+json"}
          :body   (-> (hal/new-resource "/users")
                    (hal/add-resources
                      :users [(create-user "fred")
@@ -538,6 +547,7 @@
       (stubs/on-get
         (create-url base-url "/users")
         {:status 200
+         :headers {:content-type "application/hal+json"}
          :body   (-> (hal/new-resource "/users")
                    (hal/add-resources
                      :users [(create-user "fred")
@@ -569,4 +579,44 @@
     (is (thrown? ExceptionInfo
           (navigator/resume
             (-> (hal/new-resource)
-              (hal/add-href :self "/users")))))))
+              (hal/add-href :self "/users"))))))
+
+  (testing "should not parse body as HAL resource if not a HAL media-type"
+    (with-fake-http
+      (concat
+        (stubs/on-discover
+          base-url
+          :files {:href      "/files/{name}"
+                  :templated true})
+        (stubs/on-get
+          (create-url base-url "/files/file")
+          {:status 200
+           :headers {:content-type "text/html"}
+           :body    "<h1>Hello world</h1>"}))
+      (let [result (-> (navigator/discover base-url)
+                     (navigator/get :files {:name "file"}))
+            status (navigator/status result)
+            file   (navigator/response result)]
+        (is (= 200 status))
+        (is (= (:body file) "<h1>Hello world</h1>")))))
+
+  (testing "should encode POST body as JSON if no Content-Type is set"
+    (with-fake-http
+      (concat
+        (stubs/on-discover
+          base-url
+          :files {:href      "/files/{name}"
+                  :templated true})
+        (stubs/on-post
+          (create-url base-url "/files/file")
+          {:foo [1 2 3]}
+          {:status 200
+           :headers {:content-type "text/html"}
+           :body    "<h1>Hello world</h1>"}))
+      (let [result (-> (navigator/discover base-url)
+                     (navigator/post :files {:name "file"}
+                       {:foo [1 2 3]}))
+            status (navigator/status result)
+            file   (navigator/response result)]
+        (is (= 200 status))
+        (is (= (:body file) "<h1>Hello world</h1>"))))))

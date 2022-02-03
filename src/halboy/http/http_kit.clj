@@ -1,10 +1,11 @@
 (ns halboy.http.http-kit
   (:require
-    [clojure.walk :refer [stringify-keys]]
+    [clojure.walk :refer [stringify-keys keywordize-keys]]
     [org.httpkit.client :as http]
     [halboy.argutils :refer [deep-merge]]
+    [halboy.data :refer [update-if-present]]
     [halboy.http.protocol :as protocol]
-    [halboy.http.utils :as utils]))
+    [halboy.json :as haljson]))
 
 (def default-http-options
   {:as      :text
@@ -40,11 +41,11 @@
     (let [request (-> request
                       (with-default-options)
                       (with-transformed-params)
-                      (utils/with-json-body))
+                      (haljson/if-json-encode-body))
           http-fn (http-method->fn method)]
       (-> @(http-fn url request)
-          (utils/parse-json-response)
+          (haljson/if-json-parse-response)
           (format-for-halboy)))))
 
 (defn new-http-client []
-  (HttpKitHttpClient.))
+  (DefaultHttpClient.))
