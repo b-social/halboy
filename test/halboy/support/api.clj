@@ -1,45 +1,48 @@
 (ns halboy.support.api
-  (:require [clojure.walk :refer [stringify-keys]]
-            [cheshire.core :as json]
+  (:require [cheshire.core :as json]
             [halboy.resource :refer [new-resource add-links]]
             [halboy.json :refer [resource->json]]))
 
 (defn- redirect-to [location]
   {:status  201
-   :headers {:location location}})
+   :headers {"Location" location}})
 
 (defn on-discover [url & kvs]
-  [{:method :get :url url}
-   {:status 200
-    :headers {"Content-Type" "application/hal+json"}
-    :body   (-> (new-resource)
-                ((partial apply add-links) kvs)
-                resource->json)}])
+  {:request  {:url    url
+              :method "GET"}
+   :response {:status  200
+              :headers {"Content-Type" "application/hal+json"}
+              :body    (-> (new-resource)
+                         ((partial apply add-links) kvs)
+                         resource->json)}})
 
 (defn on-head
   ([url response]
-   [{:method :head :url url}
-    response]))
+   {:request  {:urlPath url
+               :method  "HEAD"}
+    :response response}))
 
 (defn on-get
   ([url response]
-   [{:method :get :url url}
-    response])
+   {:request  {:urlPath url
+               :method  "GET"}
+    :response response})
   ([url params response]
-   [{:method       :get
-     :url          url
-     :query-params (stringify-keys params)}
-    response]))
+   {:request  {:method          "GET"
+               :urlPath         url
+               :queryParameters params}
+    :response response}))
 
 (defn on-post
   ([url response]
-   [{:method :post :url url}
-    response])
+   {:request  {:urlPath url
+               :method  "POST"}
+    :response response})
   ([url body response]
-   [{:method :post
-     :url    url
-     :body   (json/generate-string body)}
-    response]))
+   {:request  {:urlPath      url
+               :method       "POST"
+               :bodyPatterns [{:equalToJson body}]}
+    :response response}))
 
 (defn on-post-with-headers
   ([url headers response]
@@ -62,13 +65,14 @@
 
 (defn on-put
   ([url response]
-   [{:method :put :url url}
-    response])
+   {:request  {:urlPath url
+               :method  "PUT"}
+    :response response})
   ([url body response]
-   [{:method :put
-     :url    url
-     :body   (json/generate-string body)}
-    response]))
+   {:request  {:urlPath      url
+               :method       "PUT"
+               :bodyPatterns [{:equalToJson body}]}
+    :response response}))
 
 (defn on-put-redirect
   ([url location]
@@ -78,13 +82,14 @@
 
 (defn on-patch
   ([url response]
-   [{:method :patch :url url}
-    response])
+   {:request  {:urlPath url
+               :method  "PATCH"}
+    :response response})
   ([url body response]
-   [{:method :patch
-     :url    url
-     :body   (json/generate-string body)}
-    response]))
+   {:request  {:urlPath      url
+               :method       "PATCH"
+               :bodyPatterns [{:equalToJson body}]}
+    :response response}))
 
 (defn on-patch-redirect
   ([url location]
@@ -94,17 +99,18 @@
 
 (defn on-delete
   ([url response]
-   [{:method :delete :url url}
-    response])
+   {:request  {:urlPath url
+               :method  "DELETE"}
+    :response response})
   ([url params response]
-   [{:method       :delete
-     :url          url
-     :query-params (stringify-keys params)}
-    response]))
+   {:request  {:method          "DELETE"
+               :urlPath         url
+               :queryParameters params}
+    :response response}))
 
 (defn on-delete-with-headers
   [url headers response]
-  [{:method  :delete
-    :url     url
-    :headers headers}
-   response])
+  {:request  {:urlPath url
+              :method  "DELETE"
+              :headers headers}
+   :response response})
