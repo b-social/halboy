@@ -13,5 +13,20 @@
   :plugins [[lein-eftest "0.5.9"]]
   :profiles {:shared {:dependencies [[nrepl "0.9.0"]]}
              :test   [:shared {:dependencies [[http-kit.fake "0.2.2"]
-                                              [eftest "0.5.9"]]}]}
+                                              [eftest "0.5.9"]]}]
+             :repl   [:shared {:dependencies [[http-kit.fake "0.2.2"]
+                                              [eftest "0.5.9"]
+                                              [b-social/wiremock-wrapper "0.1.0"
+                                               ;:exclusions [org.eclipse.jetty/jetty-servlet
+                                               ;             org.eclipse.jetty/jetty-webapp
+                                               ;             org.eclipse.jetty/jetty-xml
+                                               ;             org.eclipse.jetty/jetty-servlets]
+                                               ]
+                                              [org.slf4j/jcl-over-slf4j "1.7.25"]
+                                              [org.slf4j/jul-to-slf4j "1.7.25"]
+                                              [org.slf4j/log4j-over-slf4j "1.7.25"]
+                                              [ch.qos.logback/logback-classic "1.2.3"
+                                               :exclusions [org.slf4j/slf4j-api org.slf4j/slf4j-log4j12]]]}]
+
+             }
   :eftest {:multithread? false})

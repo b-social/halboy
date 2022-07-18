@@ -6,9 +6,26 @@
             [halboy.resource :as hal]
             [halboy.json :as json]
             [halboy.support.api :as stubs]
-            [halboy.resource :as hal])
+            [halboy.resource :as hal]
+            [wiremock-wrapper :as wiremock]
+            [org.httpkit.client :as http])
   (:import [java.net URL]
            [clojure.lang ExceptionInfo]))
+
+(defn wiremock-base-url
+  [wire-mock-server]
+  (str "http://localhost:"
+    (.portNumber (.getOptions @wire-mock-server))))
+
+(defn configure-mocks-on
+  [wire-mock-server-atom mocks]
+  (doseq [mock mocks]
+    (let [response (-> (wiremock/mappings-url @wire-mock-server-atom)
+                     (http/post {:body (wiremock/->wire-json mock)})
+                     (deref))]
+      (when-not (= (:status response) 201)
+        (throw (ex-info "Error while adding mapping to WireMock server"
+                 response))))))
 
 (def base-url "https://service.example.com")
 (defn- create-url [base-url resource]
@@ -21,56 +38,65 @@
     (hal/add-link :self {:href (create-url base-url (format "/users/%s" name))})
     (hal/add-property :name (capitalize name))))
 
-(deftest halboy-navigator
-  (testing "should be able to retrieve the settings"
-    (with-fake-http
-      (stubs/on-discover
-        base-url
-        :users {:href      "/users{?admin}"
-                :templated true})
+(let [wire-mock-server (wiremock/new-wire-mock-server)
+      base-url (wiremock-base-url wire-mock-server)]
+  (use-fixtures :once
+    (wiremock/with-wire-mock-server wire-mock-server))
+  (use-fixtures :each
+    (wiremock/with-empty-wire-mock-server wire-mock-server)
+    (wiremock/with-verify-nounmatched wire-mock-server))
+
+  (deftest navigator-default-options
+    (testing "should be able to retrieve the settings"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?admin}"
+                   :templated true})])
       (let [options (-> (navigator/discover base-url)
                       (navigator/settings))]
         (is (true? (:follow-redirects options)))
         (is (empty? (:headers options)))
         (is (not (nil? (:client options)))))))
 
-  (testing "should be able to pass options to the HTTP client"
-    (let [resource-url (create-url base-url "/users/thomas")]
-      (with-fake-http
-        (concat
-          (stubs/on-discover
-            base-url
-            :user {:href      "/users/{id}"
-                   :templated true})
-          (stubs/on-delete-with-headers
-            resource-url
-            {"Content-Type" "application/json"
-             "Accept"       "application/hal+json"
-             "My-Header"    "some-value"}
-            {:status 204}))
-        (let [result (->
-                       (navigator/discover base-url {:http {:headers {"My-Header" "some-value"}}})
-                       (navigator/delete :user {:id "thomas"}))
-              status (navigator/status result)]
-          (is (= 204 status))))))
-
-  (testing "should be able to navigate through links in an API"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin}"
+  (deftest navigator-set-options
+    (testing "should be able to pass options to the HTTP client"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :user {:href      "/users/{id}"
                   :templated true})
-        (stubs/on-get
-          (create-url base-url "/users")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users")
-                     (hal/add-resources
-                       :users (create-user "fred")
-                       :users (create-user "sue")
-                       :users (create-user "mary"))
-                     (json/resource->json))}))
+         (stubs/on-delete-with-headers
+           "/users/thomas"
+           {"Content-Type" {:equalTo "application/json"}
+            "Accept"       {:equalTo "application/hal+json"}
+            "My-Header"    {:equalTo "some-value"}}
+           {:status 204})])
+      (let [result (->
+                     (navigator/discover base-url {:http {:headers {"My-Header" "some-value"}}})
+                     (navigator/delete :user {:id "thomas"}))
+            status (navigator/status result)]
+        (is (= 204 status)))))
+
+  (deftest navigator-links
+    (testing "should be able to navigate through links in an API"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?admin}"
+                   :templated true})
+         (stubs/on-get
+           "/users"
+           {:status 200
+            :body   (-> (hal/new-resource "/users")
+                      (hal/add-resources
+                        :users (create-user "fred")
+                        :users (create-user "sue")
+                        :users (create-user "mary"))
+                      (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/get :users))
             status (navigator/status result)
@@ -82,46 +108,52 @@
         (is (= ["Fred" "Sue" "Mary"]
               (map #(hal/get-property % :name) users))))))
 
-  (testing "should throw an error when trying to get a link which does not exist"
-    (with-fake-http
-      (stubs/on-discover base-url)
+  (deftest navigator-invalid-link
+    (testing "should throw an error when trying to get a link which does not exist"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-get
+           "/"
+           {:status 200})])
       (is (thrown-with-msg?
             ExceptionInfo
             #"Attempting to follow a link which does not exist"
             (-> (navigator/discover base-url)
               (navigator/get :users))))))
 
-  (testing "should NOT throw an error when the response is not JSON"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin}"
-                  :templated true})
-        (stubs/on-get
-          (create-url base-url "/users")
-          {:status 200
-           :body   "I am not JSON"}))
+  (deftest navigator-invalid-json
+    (testing "should NOT throw an error when the response is not JSON"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?admin}"
+                   :templated true})
+         (stubs/on-get
+           "/users"
+           {:status  200
+            :headers {"Content-Type" "text/plain"}
+            :body    "I am not JSON"})])
       (is (-> (navigator/discover base-url)
             (navigator/get :users)))))
 
-  (testing "should be able to navigate through links with query params"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin}"
-                  :templated true})
-        (stubs/on-get
-          (create-url base-url "/users") {:admin "true"}
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users")
-                     (hal/add-resources
-                       :users (create-user "fred")
-                       :users (create-user "sue")
-                       :users (create-user "mary"))
-                     (json/resource->json))}))
+  (deftest navigator-query-params
+    (testing "should be able to navigate through links with query params"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?admin}"
+                   :templated true})
+         (stubs/on-get
+           "/users" {:admin {:equalTo "true"}}
+           {:status 200
+            :body   (-> (hal/new-resource "/users")
+                      (hal/add-resources
+                        :users (create-user "fred")
+                        :users (create-user "sue")
+                        :users (create-user "mary"))
+                      (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/get :users {:admin true}))
             status (navigator/status result)
@@ -133,23 +165,24 @@
         (is (= ["Fred" "Sue" "Mary"]
               (map #(hal/get-property % :name) users))))))
 
-  (testing "should be able to navigate through links with multiple query params"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin,owner}"
-                  :templated true})
-        (stubs/on-get
-          (create-url base-url "/users") {:admin "true"
-                                          :owner "false"}
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users")
-                     (hal/add-resources
-                       :users (create-user "fred")
-                       :users (create-user "sue"))
-                     (json/resource->json))}))
+  (deftest navigator-multiple-query-params
+    (testing "should be able to navigate through links with multiple query params"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?admin,owner}"
+                   :templated true})
+         (stubs/on-get
+           "/users"
+           {:admin {:equalTo "true"}
+            :owner {:equalTo "false"}}
+           {:status 200
+            :body   (-> (hal/new-resource "/users")
+                      (hal/add-resources
+                        :users (create-user "fred")
+                        :users (create-user "sue"))
+                      (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/get :users {:admin true
                                             :owner false}))
@@ -162,23 +195,24 @@
         (is (= ["Fred" "Sue"]
               (map #(hal/get-property % :name) users))))))
 
-  (testing "should be able to navigate with a mixture of template and query params"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :friends {:href      "/users/{id}/friends{?mutual}"
-                    :templated true})
-        (stubs/on-get
-          (create-url base-url "/users/thomas/friends") {:mutual "true"}
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas/friends")
-                     (hal/add-resources
-                       :users (create-user "fred")
-                       :users (create-user "sue")
-                       :users (create-user "mary"))
-                     (json/resource->json))}))
+  (deftest navigator-mixed-template-and-query-params
+    (testing "should be able to navigate with a mixture of template and query params"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :friends {:href      "/users/{id}/friends{?mutual}"
+                     :templated true})
+         (stubs/on-get
+           "/users/thomas/friends" {:mutual {:equalTo "true"}}
+           {:status  200
+            :headers {:content-type "application/hal+json"}
+            :body    (-> (hal/new-resource "/users/thomas/friends")
+                       (hal/add-resources
+                         :users (create-user "fred")
+                         :users (create-user "sue")
+                         :users (create-user "mary"))
+                       (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/get :friends {:id "thomas" :mutual true}))
             status (navigator/status result)
@@ -190,23 +224,24 @@
         (is (= ["Fred" "Sue" "Mary"]
               (map #(hal/get-property % :name) users))))))
 
-  (testing "should be able to create resources in an API"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href "/users"})
-        (stubs/on-post-redirect
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          "/users/thomas")
-        (stubs/on-get
-          (create-url base-url "/users/thomas")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (json/resource->json))}))
+  (deftest navigator-create-resource
+    (testing "should be able to create resources in an API"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href "/users"})
+         (stubs/on-post-redirect
+           "/users"
+           {:name "Thomas"}
+           "/users/thomas")
+         (stubs/on-get
+           "/users/thomas"
+           {:status  200
+            :headers {"Content-Type" "application/hal+json"}
+            :body    (-> (hal/new-resource "/users/thomas")
+                       (hal/add-property :name "Thomas")
+                       (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/post :users {:name "Thomas"}))
             status (navigator/status result)
@@ -215,40 +250,42 @@
         (is (= 200 status))
         (is (= "Thomas" (hal/get-property new-user :name))))))
 
-  (testing "should be able to remove resources in an API"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :user {:href      "/users/{id}"
-                 :templated true})
-        (stubs/on-delete
-          (create-url base-url "/users/thomas")
-          {:status 204}))
+  (deftest navigator-delete-resource
+    (testing "should be able to remove resources in an API"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :user {:href      "/users/{id}"
+                  :templated true})
+         (stubs/on-delete
+           "/users/thomas"
+           {:status 204})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/delete :user {:id "thomas"}))
             status (navigator/status result)]
         (is (= 204 status)))))
 
-  (testing "should be able to update resources in an API"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :user {:href      "/users/{id}"
-                 :templated true})
-        (stubs/on-patch-redirect
-          (create-url base-url "/users/thomas")
-          {:surname "Svensson"}
-          "/users/thomas")
-        (stubs/on-get
-          (create-url base-url "/users/thomas")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (hal/add-property :surname "Svensson")
-                     (json/resource->json))}))
+  (deftest navigator-update-resource
+    (testing "should be able to update resources in an API"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :user {:href      "/users/{id}"
+                  :templated true})
+         (stubs/on-patch-redirect
+           "/users/thomas"
+           {:surname "Svensson"}
+           "/users/thomas")
+         (stubs/on-get
+           "/users/thomas"
+           {:status  200
+            :headers {"Content-Type" "application/hal+json"}
+            :body    (-> (hal/new-resource "/users/thomas")
+                       (hal/add-property :name "Thomas")
+                       (hal/add-property :surname "Svensson")
+                       (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/patch :user {:id "thomas"} {:surname "Svensson"}))
             status (navigator/status result)
@@ -258,25 +295,26 @@
         (is (= "Thomas" (hal/get-property new-user :name)))
         (is (= "Svensson" (hal/get-property new-user :surname))))))
 
-  (testing "should handle query params on post"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?first,second}"
-                  :templated true})
-        (stubs/on-post-redirect
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          "/users/thomas")
-        (stubs/on-get
-          (create-url base-url "/users/thomas")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource)
-                     (hal/add-link :self "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (json/resource->json))}))
+  (deftest navigator-post-with-params
+    (testing "should handle query params on post"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?first,second}"
+                   :templated true})
+         (stubs/on-post-redirect
+           "/users"
+           {:name "Thomas"}
+           "/users/thomas")
+         (stubs/on-get
+           "/users/thomas"
+           {:status  200
+            :headers {"Content-Type" "application/hal+json"}
+            :body    (-> (hal/new-resource)
+                       (hal/add-link :self "/users/thomas")
+                       (hal/add-property :name "Thomas")
+                       (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/post :users {:name "Thomas"}))
             status (navigator/status result)
@@ -285,333 +323,336 @@
         (is (= 200 status))
         (is (= "Thomas" (hal/get-property new-user :name))))))
 
-  (testing "should handle query params on delete"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?name}"
-                  :templated true})
-        (stubs/on-delete
-          (create-url base-url "/users") {:name "thomas"}
-          {:status 204}))
+  (deftest navigator-delete-with-params
+    (testing "should handle query params on delete"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :users {:href      "/users{?name}"
+                   :templated true})
+         (stubs/on-delete
+           "/users" {:name {:equalTo "thomas"}}
+           {:status 204})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/delete :users {:name "thomas"}))
             status (navigator/status result)]
         (is (= 204 status)))))
 
-  (testing "should be able to use template params when creating resources"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :useritems {:href      "/users/{id}/items"
-                      :templated true})
-        (stubs/on-post-redirect
-          (create-url base-url "/users/thomas/items")
-          {:name "Sponge"}
-          "/users/thomas/items/1")
-        (stubs/on-get
-          (create-url base-url "/users/thomas/items/1")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas/items/1")
-                     (hal/add-property :name "Sponge")
-                     (json/resource->json))}))
+  (deftest navigator-post-template-path
+    (testing "should be able to use template params when creating resources"
+      (configure-mocks-on
+        wire-mock-server
+        [(stubs/on-discover
+           "/"
+           :useritems {:href      "/users/{id}/items"
+                       :templated true})
+         (stubs/on-post-redirect
+           "/users/thomas/items"
+           {:name "Sponge"}
+           "/users/thomas/items/1")
+         (stubs/on-get
+           "/users/thomas/items/1"
+           {:status  200
+            :headers {"Content-Type" "application/hal+json"}
+            :body    (-> (hal/new-resource "/users/thomas/items/1")
+                       (hal/add-property :name "Sponge")
+                       (json/resource->json))})])
       (let [result (-> (navigator/discover base-url)
                      (navigator/post :useritems {:id "thomas"} {:name "Sponge"}))
             status (navigator/status result)
             new-item (navigator/resource result)]
 
         (is (= 200 status))
-        (is (= "Sponge" (hal/get-property new-item :name))))))
+        (is (= "Sponge" (hal/get-property new-item :name)))))))
 
-  (testing "should not follow location headers when the status is not 201"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin}"
-                  :templated true})
-        (stubs/on-post
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          {:status 400}))
-      (let [status (-> (navigator/discover base-url)
-                     (navigator/post :users {:name "Thomas"})
-                     (navigator/status))]
-        (is (= 400 status)))))
-
-  (testing "should not follow location headers when the options say not to"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href      "/users{?admin}"
-                  :templated true})
-        (stubs/on-post-redirect
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          "/users/thomas"))
-      (let [result (-> (navigator/discover base-url {:follow-redirects false})
-                     (navigator/post :users {:name "Thomas"}))
-            status (navigator/status result)]
-
-        (is (= 201 status))
-
-        (is (= "/users/thomas"
-              (navigator/get-header result :location))))))
-
-  (testing "should be able to continue the conversation even if we do not follow redirects"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href "/users"})
-        (stubs/on-post-redirect
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          "/users/thomas")
-        (stubs/on-get
-          (create-url base-url "/users/thomas")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (json/resource->json))}))
-      (let [result (-> (navigator/discover base-url {:follow-redirects false})
-                     (navigator/post :users {:name "Thomas"})
-                     (navigator/follow-redirect))
-            status (navigator/status result)
-            new-user (navigator/resource result)]
-
-        (is (= 200 status))
-        (is (= "Thomas" (hal/get-property new-user :name))))))
-
-  (testing "should throw when trying to follow a redirect without a location header"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :users {:href "/users"})
-        (stubs/on-post
-          (create-url base-url "/users")
-          {:name "Thomas"}
-          {:status  201
-           :headers {}}))
-      (is (thrown? ExceptionInfo
-            (-> (navigator/discover base-url {:follow-redirects false})
-              (navigator/post :users {:name "Thomas"})
-              (navigator/follow-redirect))))))
-
-  (testing "should be able to put to a resource"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :user {:href      "/users/{id}"
-                 :templated true})
-        (stubs/on-put
-          (create-url base-url "/users/thomas")
-          {:name "Thomas"}
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (json/resource->json))}))
-      (let [result (-> (navigator/discover base-url)
-                     (navigator/put :user {:id "thomas"} {:name "Thomas"}))
-            status (navigator/status result)
-            user (navigator/resource result)]
-
-        (is (= 200 status))
-        (is (= "Thomas" (hal/get-property user :name))))))
-
-  (testing "should follow redirects when putting to a resource returns a 201"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :user {:href      "/users/{id}"
-                 :templated true})
-        (stubs/on-put-redirect
-          (create-url base-url "/users/thomas")
-          {:name "Thomas"}
-          "/users/thomas")
-        (stubs/on-get
-          (create-url base-url "/users/thomas")
-          {:status 200
-           :headers {:content-type "application/hal+json"}
-           :body   (-> (hal/new-resource "/users/thomas")
-                     (hal/add-property :name "Thomas")
-                     (json/resource->json))}))
-      (let [result (-> (navigator/discover base-url)
-                     (navigator/put :user {:id "thomas"} {:name "Thomas"}))
-            status (navigator/status result)
-            user (navigator/resource result)]
-
-        (is (= 200 status))
-        (is (= "Thomas" (hal/get-property user :name))))))
-
-  (testing "should be able to head to a resource"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :user {:href      "/users/{id}"
-                 :templated true})
-        (stubs/on-head
-          (create-url base-url "/users/thomas")
-          {:status 200}))
-      (let [result (-> (navigator/discover base-url)
-                     (navigator/head :user {:id "thomas"}))
-            status (navigator/status result)]
-
-        (is (= 200 status)))))
-
-  (testing "should be able to set header for delete"
-    (let [resource-url (create-url base-url "/users/thomas")]
-      (with-fake-http
-        (concat
-          (stubs/on-discover
-            base-url
-            :user {:href      "/users/{id}"
-                   :templated true})
-          (stubs/on-delete-with-headers
-            resource-url
-            {"Content-Type"        "application/json"
-             "Accept"              "application/hal+json"
-             "X-resource-location" resource-url}
-            {:status 204}))
-        (let [result (->
-                       (navigator/discover base-url)
-                       (navigator/set-header "X-resource-location" resource-url)
-                       (navigator/delete :user {:id "thomas"}))
-              status (navigator/status result)]
-          (is (= 204 status))))))
-
-  (testing "should be able to set header for post"
-    (let [resource-url (create-url base-url "/users/thomas")]
-      (with-fake-http
-        (concat
-          (stubs/on-discover
-            base-url
-            :users {:href "/users"})
-          (stubs/on-post-with-headers
-            (create-url base-url "/users")
-            {"Content-Type"        "application/json"
-             "Accept"              "application/hal+json"
-             "X-resource-location" resource-url}
-            {:name "Thomas"}
-            {:status 201}))
-        (let [result (-> (navigator/discover base-url {:follow-redirects false})
-                       (navigator/set-header "X-resource-location" resource-url)
-                       (navigator/post :users {:name "Thomas"}))
-              status (navigator/status result)]
-
-          (is (= 201 status))))))
-
-  (testing "should be able to resume conversations"
-    (with-fake-http
-      (stubs/on-get
-        (create-url base-url "/users")
-        {:status 200
-         :headers {:content-type "application/hal+json"}
-         :body   (-> (hal/new-resource "/users")
-                   (hal/add-resources
-                     :users [(create-user "fred")
-                             (create-user "sue")
-                             (create-user "mary")])
-                   (json/resource->json))})
-      (let [resource (-> (hal/new-resource base-url)
-                       (hal/add-link :users {:href      "/users{?admin}"
-                                             :templated true}))
-            result (-> (navigator/resume resource)
-                     (navigator/get :users))
-            status (navigator/status result)
-            users (-> (navigator/resource result)
-                    (hal/get-resource :users))]
-
-        (is (= 200 status))
-
-        (is (= ["Fred" "Sue" "Mary"]
-              (map #(hal/get-property % :name) users))))))
-
-  (testing "should be able to hint at the location when the self link is not absolute"
-    (with-fake-http
-      (stubs/on-get
-        (create-url base-url "/users")
-        {:status 200
-         :headers {:content-type "application/hal+json"}
-         :body   (-> (hal/new-resource "/users")
-                   (hal/add-resources
-                     :users [(create-user "fred")
-                             (create-user "sue")
-                             (create-user "mary")])
-                   (json/resource->json))})
-      (let [resource (-> (hal/new-resource "/")
-                       (hal/add-link :users {:href      "/users{?admin}"
-                                             :templated true}))
-            result (-> (navigator/resume resource {:resume-from base-url})
-                     (navigator/get :users))
-            status (navigator/status result)
-            users (-> (navigator/resource result)
-                    (hal/get-resource :users))]
-
-        (is (= 200 status))
-
-        (is (= ["Fred" "Sue" "Mary"]
-              (map #(hal/get-property % :name) users))))))
-
-  (testing "should throw an error when trying to resume a conversation
-          with a resource that lacks a self link"
-    (is (thrown? ExceptionInfo
-          (navigator/resume
-            (hal/new-resource)))))
-
-  (testing "should throw an error when trying to resume a conversation
-          with a resource with a relative self link, and no :resume-from option"
-    (is (thrown? ExceptionInfo
-          (navigator/resume
-            (-> (hal/new-resource)
-              (hal/add-href :self "/users"))))))
-
-  (testing "should not parse body as HAL resource if not a HAL media-type"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :files {:href      "/files/{name}"
-                  :templated true})
-        (stubs/on-get
-          (create-url base-url "/files/file")
-          {:status 200
-           :headers {:content-type "text/html"}
-           :body    "<h1>Hello world</h1>"}))
-      (let [result (-> (navigator/discover base-url)
-                     (navigator/get :files {:name "file"}))
-            status (navigator/status result)
-            file   (navigator/response result)]
-        (is (= 200 status))
-        (is (= (:body file) "<h1>Hello world</h1>")))))
-
-  (testing "should encode POST body as JSON if no Content-Type is set"
-    (with-fake-http
-      (concat
-        (stubs/on-discover
-          base-url
-          :files {:href      "/files/{name}"
-                  :templated true})
-        (stubs/on-post
-          (create-url base-url "/files/file")
-          {:foo [1 2 3]}
-          {:status 200
-           :headers {:content-type "text/html"}
-           :body    "<h1>Hello world</h1>"}))
-      (let [result (-> (navigator/discover base-url)
-                     (navigator/post :files {:name "file"}
-                       {:foo [1 2 3]}))
-            status (navigator/status result)
-            file   (navigator/response result)]
-        (is (= 200 status))
-        (is (= (:body file) "<h1>Hello world</h1>"))))))
+;
+;(testing "should not follow location headers when the status is not 201"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :users {:href      "/users{?admin}"
+;                :templated true})
+;      (stubs/on-post
+;        (create-url base-url "/users")
+;        {:name "Thomas"}
+;        {:status 400}))
+;    (let [status (-> (navigator/discover base-url)
+;                   (navigator/post :users {:name "Thomas"})
+;                   (navigator/status))]
+;      (is (= 400 status)))))
+;
+;(testing "should not follow location headers when the options say not to"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :users {:href      "/users{?admin}"
+;                :templated true})
+;      (stubs/on-post-redirect
+;        (create-url base-url "/users")
+;        {:name "Thomas"}
+;        "/users/thomas"))
+;    (let [result (-> (navigator/discover base-url {:follow-redirects false})
+;                   (navigator/post :users {:name "Thomas"}))
+;          status (navigator/status result)]
+;
+;      (is (= 201 status))
+;
+;      (is (= "/users/thomas"
+;            (navigator/get-header result :location))))))
+;
+;(testing "should be able to continue the conversation even if we do not follow redirects"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :users {:href "/users"})
+;      (stubs/on-post-redirect
+;        (create-url base-url "/users")
+;        {:name "Thomas"}
+;        "/users/thomas")
+;      (stubs/on-get
+;        (create-url base-url "/users/thomas")
+;        {:status  200
+;         :headers {:content-type "application/hal+json"}
+;         :body    (-> (hal/new-resource "/users/thomas")
+;                    (hal/add-property :name "Thomas")
+;                    (json/resource->json))}))
+;    (let [result (-> (navigator/discover base-url {:follow-redirects false})
+;                   (navigator/post :users {:name "Thomas"})
+;                   (navigator/follow-redirect))
+;          status (navigator/status result)
+;          new-user (navigator/resource result)]
+;
+;      (is (= 200 status))
+;      (is (= "Thomas" (hal/get-property new-user :name))))))
+;
+;(testing "should throw when trying to follow a redirect without a location header"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :users {:href "/users"})
+;      (stubs/on-post
+;        (create-url base-url "/users")
+;        {:name "Thomas"}
+;        {:status  201
+;         :headers {}}))
+;    (is (thrown? ExceptionInfo
+;          (-> (navigator/discover base-url {:follow-redirects false})
+;            (navigator/post :users {:name "Thomas"})
+;            (navigator/follow-redirect))))))
+;
+;(testing "should be able to put to a resource"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :user {:href      "/users/{id}"
+;               :templated true})
+;      (stubs/on-put
+;        (create-url base-url "/users/thomas")
+;        {:name "Thomas"}
+;        {:status  200
+;         :headers {:content-type "application/hal+json"}
+;         :body    (-> (hal/new-resource "/users/thomas")
+;                    (hal/add-property :name "Thomas")
+;                    (json/resource->json))}))
+;    (let [result (-> (navigator/discover base-url)
+;                   (navigator/put :user {:id "thomas"} {:name "Thomas"}))
+;          status (navigator/status result)
+;          user (navigator/resource result)]
+;
+;      (is (= 200 status))
+;      (is (= "Thomas" (hal/get-property user :name))))))
+;
+;(testing "should follow redirects when putting to a resource returns a 201"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :user {:href      "/users/{id}"
+;               :templated true})
+;      (stubs/on-put-redirect
+;        (create-url base-url "/users/thomas")
+;        {:name "Thomas"}
+;        "/users/thomas")
+;      (stubs/on-get
+;        (create-url base-url "/users/thomas")
+;        {:status  200
+;         :headers {:content-type "application/hal+json"}
+;         :body    (-> (hal/new-resource "/users/thomas")
+;                    (hal/add-property :name "Thomas")
+;                    (json/resource->json))}))
+;    (let [result (-> (navigator/discover base-url)
+;                   (navigator/put :user {:id "thomas"} {:name "Thomas"}))
+;          status (navigator/status result)
+;          user (navigator/resource result)]
+;
+;      (is (= 200 status))
+;      (is (= "Thomas" (hal/get-property user :name))))))
+;
+;(testing "should be able to head to a resource"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :user {:href      "/users/{id}"
+;               :templated true})
+;      (stubs/on-head
+;        (create-url base-url "/users/thomas")
+;        {:status 200}))
+;    (let [result (-> (navigator/discover base-url)
+;                   (navigator/head :user {:id "thomas"}))
+;          status (navigator/status result)]
+;
+;      (is (= 200 status)))))
+;
+;(testing "should be able to set header for delete"
+;  (let [resource-url (create-url base-url "/users/thomas")]
+;    (with-fake-http
+;      (concat
+;        (stubs/on-discover
+;          base-url
+;          :user {:href      "/users/{id}"
+;                 :templated true})
+;        (stubs/on-delete-with-headers
+;          resource-url
+;          {"Content-Type"        "application/json"
+;           "Accept"              "application/hal+json"
+;           "X-resource-location" resource-url}
+;          {:status 204}))
+;      (let [result (->
+;                     (navigator/discover base-url)
+;                     (navigator/set-header "X-resource-location" resource-url)
+;                     (navigator/delete :user {:id "thomas"}))
+;            status (navigator/status result)]
+;        (is (= 204 status))))))
+;
+;(testing "should be able to set header for post"
+;  (let [resource-url (create-url base-url "/users/thomas")]
+;    (with-fake-http
+;      (concat
+;        (stubs/on-discover
+;          base-url
+;          :users {:href "/users"})
+;        (stubs/on-post-with-headers
+;          (create-url base-url "/users")
+;          {"Content-Type"        "application/json"
+;           "Accept"              "application/hal+json"
+;           "X-resource-location" resource-url}
+;          {:name "Thomas"}
+;          {:status 201}))
+;      (let [result (-> (navigator/discover base-url {:follow-redirects false})
+;                     (navigator/set-header "X-resource-location" resource-url)
+;                     (navigator/post :users {:name "Thomas"}))
+;            status (navigator/status result)]
+;
+;        (is (= 201 status))))))
+;
+;(testing "should be able to resume conversations"
+;  (with-fake-http
+;    (stubs/on-get
+;      (create-url base-url "/users")
+;      {:status  200
+;       :headers {:content-type "application/hal+json"}
+;       :body    (-> (hal/new-resource "/users")
+;                  (hal/add-resources
+;                    :users [(create-user "fred")
+;                            (create-user "sue")
+;                            (create-user "mary")])
+;                  (json/resource->json))})
+;    (let [resource (-> (hal/new-resource base-url)
+;                     (hal/add-link :users {:href      "/users{?admin}"
+;                                           :templated true}))
+;          result (-> (navigator/resume resource)
+;                   (navigator/get :users))
+;          status (navigator/status result)
+;          users (-> (navigator/resource result)
+;                  (hal/get-resource :users))]
+;
+;      (is (= 200 status))
+;
+;      (is (= ["Fred" "Sue" "Mary"]
+;            (map #(hal/get-property % :name) users))))))
+;
+;(testing "should be able to hint at the location when the self link is not absolute"
+;  (with-fake-http
+;    (stubs/on-get
+;      (create-url base-url "/users")
+;      {:status  200
+;       :headers {:content-type "application/hal+json"}
+;       :body    (-> (hal/new-resource "/users")
+;                  (hal/add-resources
+;                    :users [(create-user "fred")
+;                            (create-user "sue")
+;                            (create-user "mary")])
+;                  (json/resource->json))})
+;    (let [resource (-> (hal/new-resource "/")
+;                     (hal/add-link :users {:href      "/users{?admin}"
+;                                           :templated true}))
+;          result (-> (navigator/resume resource {:resume-from base-url})
+;                   (navigator/get :users))
+;          status (navigator/status result)
+;          users (-> (navigator/resource result)
+;                  (hal/get-resource :users))]
+;
+;      (is (= 200 status))
+;
+;      (is (= ["Fred" "Sue" "Mary"]
+;            (map #(hal/get-property % :name) users))))))
+;
+;(testing "should throw an error when trying to resume a conversation
+;        with a resource that lacks a self link"
+;  (is (thrown? ExceptionInfo
+;        (navigator/resume
+;          (hal/new-resource)))))
+;
+;(testing "should throw an error when trying to resume a conversation
+;        with a resource with a relative self link, and no :resume-from option"
+;  (is (thrown? ExceptionInfo
+;        (navigator/resume
+;          (-> (hal/new-resource)
+;            (hal/add-href :self "/users"))))))
+;
+;(testing "should not parse body as HAL resource if not a HAL media-type"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :files {:href      "/files/{name}"
+;                :templated true})
+;      (stubs/on-get
+;        (create-url base-url "/files/file")
+;        {:status  200
+;         :headers {:content-type "text/html"}
+;         :body    "<h1>Hello world</h1>"}))
+;    (let [result (-> (navigator/discover base-url)
+;                   (navigator/get :files {:name "file"}))
+;          status (navigator/status result)
+;          file (navigator/response result)]
+;      (is (= 200 status))
+;      (is (= (:body file) "<h1>Hello world</h1>")))))
+;
+;(testing "should encode POST body as JSON if no Content-Type is set"
+;  (with-fake-http
+;    (concat
+;      (stubs/on-discover
+;        base-url
+;        :files {:href      "/files/{name}"
+;                :templated true})
+;      (stubs/on-post
+;        (create-url base-url "/files/file")
+;        {:foo [1 2 3]}
+;        {:status  200
+;         :headers {:content-type "text/html"}
+;         :body    "<h1>Hello world</h1>"}))
+;    (let [result (-> (navigator/discover base-url)
+;                   (navigator/post :files {:name "file"}
+;                     {:foo [1 2 3]}))
+;          status (navigator/status result)
+;          file (navigator/response result)]
+;      (is (= 200 status))
+;      (is (= (:body file) "<h1>Hello world</h1>"))))))
