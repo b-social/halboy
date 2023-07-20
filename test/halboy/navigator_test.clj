@@ -582,8 +582,8 @@
               (hal/add-href :self "/users"))))))
 
   (testing "should not parse body as HAL resource if not a HAL media-type"
-    (with-fake-http
-      (concat
+    (with-fake-routes-in-isolation
+      (merge
         (stubs/on-discover
           base-url
           :files {:href      "/files/{name}"
@@ -601,8 +601,8 @@
         (is (= (:body file) "<h1>Hello world</h1>")))))
 
   (testing "should encode POST body as JSON if no Content-Type is set"
-    (with-fake-http
-      (concat
+    (with-fake-routes-in-isolation
+      (merge
         (stubs/on-discover
           base-url
           :files {:href      "/files/{name}"

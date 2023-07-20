@@ -16,7 +16,7 @@
   (deep-merge default-http-options m))
 
 (defn- with-transformed-params [m]
-  (utils/update-if-present m [:query-params] stringify-keys))
+  (update-if-present m [:query-params] stringify-keys))
 
 (defn- format-for-halboy [response]
   (merge
@@ -37,4 +37,4 @@
           (format-for-halboy)))))
 
 (defn new-http-client []
-  (DefaultHttpClient.))
+  (HttpKitHttpClient.))

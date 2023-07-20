@@ -13,7 +13,7 @@
                                      :headers {:content-type "text/html"
                                                :server       "org.httpkit.fake"}
                                      :body "{}"}]
-      (let [client (http-client/new-http-client)
+      (let [client (httpkit-client/new-http-client)
             request {:url    base-url
                      :method :get}]
         (is (=
@@ -39,7 +39,7 @@
                                      :headers {:content-type "application/json"
                                                :server       "org.httpkit.fake"}
                                      :body "{}"}]
-      (let [client (http-client/new-http-client)
+      (let [client (httpkit-client/new-http-client)
             request {:url    base-url
                      :method :get}]
         (is (=
