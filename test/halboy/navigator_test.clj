@@ -102,6 +102,7 @@
         (stubs/on-get
           (create-url base-url "/users")
           {:status 200
+           :headers {:content-type "text/html"}
            :body   "I am not JSON"}))
       (is (-> (navigator/discover base-url)
             (navigator/get :users)))))

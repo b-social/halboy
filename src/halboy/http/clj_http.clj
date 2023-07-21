@@ -2,7 +2,8 @@
   (:require [halboy.http.protocol :as protocol]
             [clj-http.client :as client]
             [halboy.http.utils :as http-utils]
-            [halboy.argutils :refer [deep-merge]]))
+            [halboy.argutils :refer [deep-merge]]
+            [halboy.types :as types]))
 
 (defn- format-for-halboy [response url opts]
   (merge
@@ -15,7 +16,7 @@
     {:throw-exceptions false
      :headers {"Accept"       "application/hal+json"
                "Content-Type" "application/json"}
-     :as      :text}
+     :as      :auto}
     m))
 
 (deftype CljHttpClient []
@@ -23,10 +24,10 @@
   (exchange [_ {:keys [url] :as opts}]
     (let [opts (-> opts
                  (default-clj-http-options)
-                 (http-utils/with-json-body))]
+                 (types/if-json-encode-body))]
       (->
         (client/request opts)
-        (http-utils/parse-json-response)
+        (types/coerce-response-type)
         (format-for-halboy url opts)))))
 
 (defn new-http-client []
