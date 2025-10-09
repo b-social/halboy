@@ -3,7 +3,7 @@
   :license {:name "MIT License"
             :url  "https://opensource.org/licenses/MIT"}
   :url "https://github.com/jimmythompson/halboy"
-  :dependencies [[org.clojure/clojure "1.11.1"]
+  :dependencies [[org.clojure/clojure "1.11.2"]
                  [org.clojure/core.rrb-vector "0.1.2"]
                  [http-kit "2.6.0"]
                  [cheshire "5.11.0"]
